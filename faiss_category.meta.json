@@ -1,0 +1,27 @@
+{
+  "categories": [
+    "Billing & Payment",
+    "Data Analytics & Performance",
+    "Feature Request & System Upgrade",
+    "Marketing Campaign & Strategy",
+    "Product & Service Information",
+    "Security & Data Breach",
+    "Software Integration & Setup",
+    "Technical Issue & Outage"
+  ],
+  "counts": {
+    "Billing & Payment": 10,
+    "Data Analytics & Performance": 10,
+    "Feature Request & System Upgrade": 10,
+    "Marketing Campaign & Strategy": 10,
+    "Product & Service Information": 10,
+    "Security & Data Breach": 10,
+    "Software Integration & Setup": 10,
+    "Technical Issue & Outage": 10
+  },
+  "sample_per_category": 10,
+  "seed": 42,
+  "model": "models/gemini-embedding-001",
+  "dataset_rows": 5000,
+  "created_at": "2026-05-10T06:18:36.839880+00:00"
+}
