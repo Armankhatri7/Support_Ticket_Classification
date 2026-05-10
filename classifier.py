@@ -28,6 +28,8 @@ DEFAULT_CROSS_ENCODER_DEVICE = "cuda"
 DEFAULT_SAMPLE_PER_CATEGORY = 10
 DEFAULT_RERANK_TOP_K = 3
 DEFAULT_LLM_MODEL = "gemini-2.5-flash"
+DEFAULT_HYBRID_SIM_WEIGHT = 0.8
+DEFAULT_HYBRID_RERANK_WEIGHT = 0.2
 ENV_PATH = Path(__file__).with_name(".env")
 
 
@@ -163,6 +165,16 @@ def rerank_candidates(
     pairs = [(ticket_text, category) for category in candidate_categories]
     scores = cross_encoder.predict(pairs)
     return [float(score) for score in scores]
+
+
+def _normalize_scores(values: List[float]) -> List[float]:
+    if not values:
+        return []
+    min_val = min(values)
+    max_val = max(values)
+    if max_val == min_val:
+        return [0.5 for _ in values]
+    return [(val - min_val) / (max_val - min_val) for val in values]
 
 
 def _normalize_prediction(
@@ -352,6 +364,8 @@ def classify_tickets(
     top_k: int = 1,
     rerank: bool = False,
     cross_encoder: Optional[CrossEncoder] = None,
+    hybrid_sim_weight: float = DEFAULT_HYBRID_SIM_WEIGHT,
+    hybrid_rerank_weight: float = DEFAULT_HYBRID_RERANK_WEIGHT,
     rerank_top_k: int = DEFAULT_RERANK_TOP_K,
 ) -> Tuple[List[str], List[float], Optional[List[float]], np.ndarray, np.ndarray]:
     if rerank and cross_encoder is None:
@@ -376,9 +390,16 @@ def classify_tickets(
         rerank_scores = rerank_candidates(
             ticket_text, candidate_categories, cross_encoder
         )
-        best_pos = int(np.argmax(rerank_scores))
+        similarity_scores = [float(scores[row_idx][pos]) for pos in range(rerank_top_k)]
+        sim_norm = _normalize_scores(similarity_scores)
+        rerank_norm = _normalize_scores(rerank_scores)
+        hybrid_scores = [
+            (hybrid_sim_weight * sim_val) + (hybrid_rerank_weight * rerank_val)
+            for sim_val, rerank_val in zip(sim_norm, rerank_norm)
+        ]
+        best_pos = int(np.argmax(hybrid_scores))
         predictions.append(candidate_categories[best_pos])
-        top_scores.append(float(scores[row_idx][best_pos]))
+        top_scores.append(float(hybrid_scores[best_pos]))
         top_rerank_scores.append(float(rerank_scores[best_pos]))
     return predictions, top_scores, top_rerank_scores, scores, indices
 
@@ -391,6 +412,8 @@ def score_ticket(
     top_k: int = 3,
     rerank: bool = False,
     cross_encoder: Optional[CrossEncoder] = None,
+    hybrid_sim_weight: float = DEFAULT_HYBRID_SIM_WEIGHT,
+    hybrid_rerank_weight: float = DEFAULT_HYBRID_RERANK_WEIGHT,
     rerank_top_k: int = DEFAULT_RERANK_TOP_K,
 ) -> List[Dict[str, float]]:
     if rerank and cross_encoder is None:
@@ -411,15 +434,23 @@ def score_ticket(
         rerank_scores = rerank_candidates(
             ticket_text, candidate_categories, cross_encoder
         )
+        similarity_scores = [float(scores[0][idx]) for idx in range(len(candidate_indices))]
+        sim_norm = _normalize_scores(similarity_scores)
+        rerank_norm = _normalize_scores(rerank_scores)
+        hybrid_scores = [
+            (hybrid_sim_weight * sim_val) + (hybrid_rerank_weight * rerank_val)
+            for sim_val, rerank_val in zip(sim_norm, rerank_norm)
+        ]
         for idx, category in enumerate(candidate_categories):
             results.append(
                 {
                     "category": category,
                     "faiss_score": float(scores[0][idx]),
                     "rerank_score": float(rerank_scores[idx]),
+                    "hybrid_score": float(hybrid_scores[idx]),
                 }
             )
-        results.sort(key=lambda row: row["rerank_score"], reverse=True)
+        results.sort(key=lambda row: row["hybrid_score"], reverse=True)
         return results
 
     for rank, idx in enumerate(candidate_indices):
@@ -436,6 +467,8 @@ def evaluate_sample(
     seed: int = 42,
     rerank: bool = True,
     cross_encoder: Optional[CrossEncoder] = None,
+    hybrid_sim_weight: float = DEFAULT_HYBRID_SIM_WEIGHT,
+    hybrid_rerank_weight: float = DEFAULT_HYBRID_RERANK_WEIGHT,
     rerank_top_k: int = DEFAULT_RERANK_TOP_K,
 ) -> EvaluationResult:
     sample_size = min(sample_size, len(df))
@@ -452,6 +485,8 @@ def evaluate_sample(
         top_k=rerank_top_k if rerank else 1,
         rerank=rerank,
         cross_encoder=cross_encoder,
+        hybrid_sim_weight=hybrid_sim_weight,
+        hybrid_rerank_weight=hybrid_rerank_weight,
         rerank_top_k=rerank_top_k,
     )
     latency_seconds = time.perf_counter() - start_time
