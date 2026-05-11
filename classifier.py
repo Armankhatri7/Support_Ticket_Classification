@@ -170,9 +170,7 @@ def create_cross_encoder(
     device: str = DEFAULT_CROSS_ENCODER_DEVICE,
 ) -> CrossEncoder:
     if device == "cuda" and not torch.cuda.is_available():
-        raise RuntimeError(
-            "CUDA is not available. Install a CUDA-enabled PyTorch build to use GPU."
-        )
+        device = "cpu"
     return CrossEncoder(model_name, device=device)
 
 
