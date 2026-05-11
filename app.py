@@ -14,6 +14,7 @@ from classifier import (
     DEFAULT_CROSS_ENCODER_DEVICE,
     DEFAULT_LLM_MODEL,
     GeminiEmbedder,
+    generate_ticket_response,
     load_dataset,
     load_representative_index,
     resolve_api_key,
@@ -90,8 +91,30 @@ st.divider()
 st.subheader("Classify a ticket")
 st.caption("Retrieves top 3 categories and re-ranks with a cross-encoder.")
 
-user_text = st.text_area("Ticket text", height=180)
-classify = st.button("Classify")
+confidence_threshold = 0.80
+
+if "ticket_text" not in st.session_state:
+    st.session_state["ticket_text"] = ""
+if "sample_category" not in st.session_state:
+    st.session_state["sample_category"] = ""
+
+df = load_data(DATA_PATH)
+
+load_sample = st.button("Load Sample")
+if load_sample:
+    sample_row = df.sample(n=1, random_state=None).iloc[0]
+    st.session_state["ticket_text"] = str(sample_row["Ticket"])
+    st.session_state["sample_category"] = str(sample_row["Category"])
+
+user_text = st.text_area("Ticket text", height=180, key="ticket_text")
+
+button_left, button_mid, button_right = st.columns(3)
+with button_left:
+    classify = st.button("Classify")
+with button_mid:
+    view_confidence = st.button("View Confidence")
+with button_right:
+    generate_response = st.button("Generate Response")
 
 if classify:
     if not user_text.strip():
@@ -103,11 +126,7 @@ if classify:
         else:
             with st.spinner("Embedding and searching..."):
                 embedder = get_embedder(resolved_key, model)
-                try:
-                    cross_encoder = get_cross_encoder(DEFAULT_CROSS_ENCODER_MODEL)
-                except RuntimeError as exc:
-                    st.error(str(exc))
-                    st.stop()
+                cross_encoder = get_cross_encoder(DEFAULT_CROSS_ENCODER_MODEL)
                 top_matches = score_ticket(
                     user_text.strip(),
                     categories,
@@ -118,8 +137,53 @@ if classify:
                     cross_encoder=cross_encoder,
                     rerank_top_k=3,
                 )
+            st.session_state["last_top_matches"] = top_matches
+            st.session_state["last_ticket_text"] = user_text.strip()
+            st.session_state["last_category"] = top_matches[0]["category"]
+            st.session_state["last_score"] = top_matches[0]["hybrid_score"]
             st.subheader("Top matches")
             st.dataframe(pd.DataFrame(top_matches), use_container_width=True)
+            if st.session_state.get("sample_category"):
+                st.caption(
+                    f"Actual category: {st.session_state['sample_category']}"
+                )
+
+if view_confidence:
+    last_score = st.session_state.get("last_score")
+    if last_score is None:
+        st.error("Run classification first to view confidence.")
+    else:
+        color = "green" if last_score >= confidence_threshold else "red"
+        st.markdown(
+            (
+                f"<span style='color:{color}; font-weight:600;'>"
+                f"Final score: {last_score:.4f}"
+                "</span>"
+            ),
+            unsafe_allow_html=True,
+        )
+        if last_score < confidence_threshold:
+            st.caption("Low confidence: this ticket requires human response.")
+
+if generate_response:
+    last_ticket = st.session_state.get("last_ticket_text")
+    last_category = st.session_state.get("last_category")
+    if not last_ticket or not last_category:
+        st.error("Run classification first to generate a response.")
+    else:
+        resolved_key = resolve_api_key(None)
+        if not resolved_key:
+            st.error("Missing API key. Set GEMINI_API_KEY in .env.")
+        else:
+            with st.spinner("Generating response..."):
+                reply = generate_ticket_response(
+                    last_ticket,
+                    last_category,
+                    api_key=resolved_key,
+                    model=DEFAULT_LLM_MODEL,
+                )
+            st.subheader("Generated response")
+            st.write(reply if reply else "No response returned.")
 
 st.divider()
 st.subheader("Evaluation (100 random samples)")
@@ -127,7 +191,6 @@ st.caption(
     "Runs evaluation on 100 random tickets. LLM mode sends all tickets in one call."
 )
 
-df = load_data(DATA_PATH)
 max_samples = len(df)
 sample_size = min(100, max_samples)
 

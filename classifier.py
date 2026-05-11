@@ -29,8 +29,8 @@ DEFAULT_CROSS_ENCODER_DEVICE = "cuda"
 DEFAULT_SAMPLE_PER_CATEGORY = 10
 DEFAULT_RERANK_TOP_K = 3
 DEFAULT_LLM_MODEL = "gemini-2.5-flash"
-DEFAULT_HYBRID_SIM_WEIGHT = 0.8
-DEFAULT_HYBRID_RERANK_WEIGHT = 0.2
+DEFAULT_HYBRID_SIM_WEIGHT = 0.9
+DEFAULT_HYBRID_RERANK_WEIGHT = 0.1
 ENV_PATH = Path(__file__).with_name(".env")
 
 
@@ -194,6 +194,15 @@ def _normalize_scores(values: List[float]) -> List[float]:
     return [(val - min_val) / (max_val - min_val) for val in values]
 
 
+def _normalize_signed_scores(values: List[float]) -> List[float]:
+    if not values:
+        return []
+    max_abs = max(abs(val) for val in values)
+    if max_abs == 0:
+        return [0.0 for _ in values]
+    return [val / max_abs for val in values]
+
+
 def _normalize_prediction(
     prediction: str, category_lookup: Dict[str, str]
 ) -> str:
@@ -266,6 +275,40 @@ def llm_bulk_classify(
         _normalize_prediction(str(pred), category_lookup) for pred in predictions
     ]
     return normalized
+
+
+def generate_ticket_response(
+    ticket_text: str,
+    category: str,
+    api_key: str,
+    model: str = DEFAULT_LLM_MODEL,
+) -> str:
+    if not api_key:
+        raise ValueError("Gemini API key is required.")
+    client = genai.Client(
+        api_key=api_key,
+        http_options=types.HttpOptions(api_version="v1beta"),
+    )
+    prompt = (
+        "You are a customer support agent.\n"
+        "Write a clear, concise response to the ticket.\n"
+        "Use the provided category to guide tone and content.\n"
+        "Ticket:\n"
+        f"{ticket_text.strip()}\n\n"
+        "Category:\n"
+        f"{category}\n"
+    )
+    response = _retry_call(
+        lambda: client.models.generate_content(
+            model=model,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                temperature=0.2,
+                response_mime_type="text/plain",
+            ),
+        )
+    )
+    return (response.text or "").strip()
 
 
 def build_representative_index(
@@ -411,7 +454,7 @@ def classify_tickets(
         )
         similarity_scores = [float(scores[row_idx][pos]) for pos in range(rerank_top_k)]
         sim_norm = _normalize_scores(similarity_scores)
-        rerank_norm = _normalize_scores(rerank_scores)
+        rerank_norm = _normalize_signed_scores(rerank_scores)
         hybrid_scores = [
             (hybrid_sim_weight * sim_val) + (hybrid_rerank_weight * rerank_val)
             for sim_val, rerank_val in zip(sim_norm, rerank_norm)
@@ -437,7 +480,7 @@ def score_ticket(
 ) -> List[Dict[str, float]]:
     if rerank and cross_encoder is None:
         raise ValueError("cross_encoder is required when rerank=True.")
-    _, _, scores, indices = classify_tickets(
+    _, _, _, scores, indices = classify_tickets(
         [ticket_text],
         categories,
         index,
@@ -455,7 +498,7 @@ def score_ticket(
         )
         similarity_scores = [float(scores[0][idx]) for idx in range(len(candidate_indices))]
         sim_norm = _normalize_scores(similarity_scores)
-        rerank_norm = _normalize_scores(rerank_scores)
+        rerank_norm = _normalize_signed_scores(rerank_scores)
         hybrid_scores = [
             (hybrid_sim_weight * sim_val) + (hybrid_rerank_weight * rerank_val)
             for sim_val, rerank_val in zip(sim_norm, rerank_norm)
