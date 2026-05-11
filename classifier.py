@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -31,6 +32,22 @@ DEFAULT_LLM_MODEL = "gemini-2.5-flash"
 DEFAULT_HYBRID_SIM_WEIGHT = 0.8
 DEFAULT_HYBRID_RERANK_WEIGHT = 0.2
 ENV_PATH = Path(__file__).with_name(".env")
+
+
+def _is_rate_limit_error(exc: Exception) -> bool:
+    message = str(exc)
+    return "RESOURCE_EXHAUSTED" in message or " 429" in message or "429 " in message
+
+
+def _retry_call(func, *, max_retries: int = 3, base_delay: float = 1.0):
+    for attempt in range(max_retries + 1):
+        try:
+            return func()
+        except Exception as exc:
+            if not _is_rate_limit_error(exc) or attempt >= max_retries:
+                raise
+            delay = (base_delay * (2 ** attempt)) + (random.random() * 0.25)
+            time.sleep(delay)
 
 
 @dataclass
@@ -89,9 +106,11 @@ class GeminiEmbedder:
         if uncached_texts:
             for start in range(0, len(uncached_texts), batch_size):
                 batch_texts = uncached_texts[start : start + batch_size]
-                response = self._client.models.embed_content(
-                    model=self.model,
-                    contents=batch_texts,
+                response = _retry_call(
+                    lambda: self._client.models.embed_content(
+                        model=self.model,
+                        contents=batch_texts,
+                    )
                 )
                 batch_embeddings = response.embeddings or []
                 if len(batch_embeddings) != len(batch_texts):
@@ -214,13 +233,15 @@ def llm_bulk_classify(
         f"{ticket_lines}"
     )
 
-    response = client.models.generate_content(
-        model=model,
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            temperature=0.0,
-            response_mime_type="application/json",
-        ),
+    response = _retry_call(
+        lambda: client.models.generate_content(
+            model=model,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                temperature=0.0,
+                response_mime_type="application/json",
+            ),
+        )
     )
     raw_text = (response.text or "").strip()
     if raw_text.startswith("```"):
